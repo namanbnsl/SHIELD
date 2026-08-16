@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+dist/
+
+# Generated and downloaded simulation artifacts
+data/osm/*.osm.xml
+data/osm/*.bbox.txt
+data/network/*.net.xml
+outputs/
+results/
