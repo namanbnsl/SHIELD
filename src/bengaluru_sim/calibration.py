@@ -85,7 +85,9 @@ def _run_observed_baseline(config: SimulationConfig) -> BaselineMetrics:
             connection.close()
 
     trips = _read_trips(config.routes_file)
-    results, summary = collect_results(trips, config.tripinfo_file)
+    results, summary = collect_results(
+        trips, config.tripinfo_file, simulation_end_s=config.simulation_end_s
+    )
     write_results(config.result_file, results)
     write_summary(
         config.summary_file,

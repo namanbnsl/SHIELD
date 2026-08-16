@@ -64,7 +64,9 @@ def run(config: SimulationConfig) -> int:
     print("Running simulation...", flush=True)
     run_simulation(config)
 
-    results, summary = collect_results(trips, config.tripinfo_file)
+    results, summary = collect_results(
+        trips, config.tripinfo_file, simulation_end_s=config.simulation_end_s
+    )
     write_results(config.result_file, results)
     metadata = {
         "seed": config.seed,

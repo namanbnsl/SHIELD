@@ -19,6 +19,7 @@ class VehicleResult:
     status: str
     origin_edge: str
     destination_edge: str
+    time_loss_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,8 @@ class Summary:
     unfinished: int
     mean_travel_time_s: float | None
     median_travel_time_s: float | None
+    total_time_loss_s: float = 0.0
+    mean_time_loss_s: float = 0.0
 
 
 def _optional_nonnegative(value: str | None) -> float | None:
@@ -38,7 +41,7 @@ def _optional_nonnegative(value: str | None) -> float | None:
 
 
 def collect_results(
-    trips: list[Trip], tripinfo_file: Path
+    trips: list[Trip], tripinfo_file: Path, simulation_end_s: float | None = None
 ) -> tuple[list[VehicleResult], Summary]:
     raw: dict[str, ET.Element] = {}
     if tripinfo_file.exists():
@@ -58,6 +61,10 @@ def collect_results(
         else:
             status = "completed"
         travel_time = arrival - departure if status == "completed" else None
+        time_loss = _optional_nonnegative(item.get("timeLoss")) if item is not None else None
+        if time_loss is None and simulation_end_s is not None and status != "completed":
+            reference_time = departure if departure is not None else trip.scheduled_departure_s
+            time_loss = max(simulation_end_s - reference_time, 0.0)
         results.append(
             VehicleResult(
                 trip.vehicle_id,
@@ -68,6 +75,7 @@ def collect_results(
                 status,
                 trip.origin_edge,
                 trip.destination_edge,
+                time_loss,
             )
         )
 
@@ -77,12 +85,20 @@ def collect_results(
         if result.travel_time_s is not None
     ]
     completed = len(travel_times)
+    time_losses = [
+        result.time_loss_s
+        for result in results
+        if result.time_loss_s is not None
+    ]
+    total_time_loss = sum(time_losses)
     summary = Summary(
         vehicles=len(results),
         completed=completed,
         unfinished=len(results) - completed,
         mean_travel_time_s=statistics.fmean(travel_times) if travel_times else None,
         median_travel_time_s=statistics.median(travel_times) if travel_times else None,
+        total_time_loss_s=total_time_loss,
+        mean_time_loss_s=total_time_loss / len(time_losses) if time_losses else 0.0,
     )
     return results, summary
 
@@ -101,6 +117,7 @@ def write_results(path: Path, results: list[VehicleResult]) -> None:
                 "status",
                 "origin_edge",
                 "destination_edge",
+                "time_loss_s",
             ]
         )
         for result in results:
@@ -114,6 +131,7 @@ def write_results(path: Path, results: list[VehicleResult]) -> None:
                     result.status,
                     result.origin_edge,
                     result.destination_edge,
+                    "" if result.time_loss_s is None else f"{result.time_loss_s:.2f}",
                 ]
             )
 
@@ -134,10 +152,11 @@ def write_summary(path: Path, summary: Summary, metadata: dict[str, object]) -> 
             "" if summary.median_travel_time_s is None else f"{summary.median_travel_time_s:.2f}",
             "seconds",
         ),
+        ("total_time_loss", f"{summary.total_time_loss_s:.2f}", "seconds"),
+        ("mean_time_loss", f"{summary.mean_time_loss_s:.2f}", "seconds/vehicle"),
     ]
     rows.extend((key, value, "") for key, value in metadata.items())
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["metric", "value", "unit"])
         writer.writerows(rows)
-

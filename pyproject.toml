@@ -13,6 +13,10 @@ shield-sim = "bengaluru_sim.cli:main"
 shield-gui = "bengaluru_sim.gui:main"
 shield-closure = "bengaluru_sim.closure:main"
 shield-calibrate = "bengaluru_sim.calibration:main"
+shield-information = "bengaluru_sim.information:main"
+shield-information-sweep = "bengaluru_sim.information_sweep:main"
+shield-information-conditions = "bengaluru_sim.information_conditions:main"
+shield-information-penetration = "bengaluru_sim.information_penetration:main"
 
 [dependency-groups]
 dev = [
