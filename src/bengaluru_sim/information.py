@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import subprocess
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from .closure import (
@@ -12,25 +10,23 @@ from .closure import (
     DEFAULT_CLOSURE_TIME_S,
     ClosureMetrics,
     InformationStrategy,
-    _read_summary,
-    _read_trips,
     run_closure,
 )
 from .commands import MissingSumoError
-from .config import SimulationConfig
-from .metrics import Summary
-from .metrics import collect_results
+from .config import DEFAULT_SEED, SimulationConfig, project_result_path
+from .demand import read_trips
+from .metrics import (
+    Summary,
+    collect_results,
+    read_summary,
+    read_teleports,
+    write_dict_rows,
+)
 from .network import sha256_file
 
 
-def _teleports(path: Path) -> int:
-    root = ET.parse(path).getroot()
-    element = root.find("teleports")
-    return 0 if element is None else int(element.get("total", "0"))
-
-
 def _comparison_path(project_dir: Path) -> Path:
-    return project_dir / "results" / "information_comparison.csv"
+    return project_result_path(project_dir, "information_comparison.csv")
 
 
 def _summary_row(
@@ -66,38 +62,21 @@ def _summary_row(
     }
 
 
-def _write_comparison(path: Path, rows: list[dict[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def refresh_information_comparison(
     config: SimulationConfig,
     edge_id: str = DEFAULT_CLOSED_EDGE,
     closure_time_s: float = DEFAULT_CLOSURE_TIME_S,
 ) -> Path:
     """Refresh derived metrics from existing minimal/global raw tripinfo files."""
-    trips = _read_trips(config.routes_file)
+    trips = read_trips(config.routes_file)
     network_hash = sha256_file(config.network_file)
     demand_hash = sha256_file(config.routes_file)
     rows: list[dict[str, object]] = []
     for strategy in ("minimal", "global"):
         output_prefix = f"information-{strategy}"
-        summary_path = (
-            config.project_dir
-            / "results"
-            / f"{output_prefix.replace('-', '_')}_run_summary.csv"
-        )
-        values = _read_summary(summary_path)
-        tripinfo_path = (
-            config.project_dir
-            / "outputs"
-            / f"seed-{config.seed}-{output_prefix}"
-            / "tripinfo.xml"
-        )
+        _, summary_path = config.named_result_paths(output_prefix)
+        values = read_summary(summary_path)
+        tripinfo_path = config.output_dir(output_prefix) / "tripinfo.xml"
         _results, summary = collect_results(
             trips, tripinfo_path, simulation_end_s=config.simulation_end_s
         )
@@ -122,18 +101,13 @@ def refresh_information_comparison(
                 closure_time_s,
                 summary,
                 extra,
-                _teleports(
-                    config.project_dir
-                    / "outputs"
-                    / f"seed-{config.seed}-{output_prefix}"
-                    / "statistics.xml"
-                ),
+                read_teleports(config.output_dir(output_prefix) / "statistics.xml"),
                 network_hash,
                 demand_hash,
             )
         )
     output = _comparison_path(config.project_dir)
-    _write_comparison(output, rows)
+    write_dict_rows(output, rows)
     return output
 
 
@@ -149,7 +123,7 @@ def run_information_comparison(
             "Validated inputs are missing. Generate the 2,500-vehicle scenario first."
         )
 
-    trips = _read_trips(config.routes_file)
+    trips = read_trips(config.routes_file)
     if len(trips) != config.vehicles:
         raise RuntimeError(
             f"demand contains {len(trips)} vehicles, expected {config.vehicles}"
@@ -170,12 +144,7 @@ def run_information_comparison(
         )
         if sha256_file(config.routes_file) != demand_hash:
             raise RuntimeError("demand file changed while running the comparison")
-        statistics_file = (
-            config.project_dir
-            / "outputs"
-            / f"seed-{config.seed}-information-{strategy}"
-            / "statistics.xml"
-        )
+        statistics_file = config.output_dir(f"information-{strategy}") / "statistics.xml"
         rows.append(
             _summary_row(
                 strategy,
@@ -184,12 +153,16 @@ def run_information_comparison(
                 closure_time_s,
                 summary,
                 extra,
-                _teleports(statistics_file),
+                read_teleports(statistics_file),
                 network_hash,
                 demand_hash,
             )
         )
-        mean = "n/a" if summary.mean_travel_time_s is None else f"{summary.mean_travel_time_s:.2f}s"
+        mean = (
+            "n/a"
+            if summary.mean_travel_time_s is None
+            else f"{summary.mean_travel_time_s:.2f}s"
+        )
         print(
             f"{strategy}: completed={summary.completed}/{summary.vehicles}, "
             f"mean={mean}, rerouted={extra.rerouted}, "
@@ -198,7 +171,7 @@ def run_information_comparison(
         )
 
     output = _comparison_path(config.project_dir)
-    _write_comparison(output, rows)
+    write_dict_rows(output, rows)
     return output
 
 
@@ -208,7 +181,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--project-dir", type=Path, default=Path.cwd())
     parser.add_argument("--vehicles", type=int, default=2_500)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--edge", default=DEFAULT_CLOSED_EDGE)
     parser.add_argument("--closure-time", type=float, default=DEFAULT_CLOSURE_TIME_S)
     return parser

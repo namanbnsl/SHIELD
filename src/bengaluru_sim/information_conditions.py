@@ -5,7 +5,6 @@ import csv
 import statistics
 import subprocess
 import sys
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -13,16 +12,14 @@ from .closure import (
     DEFAULT_CLOSED_EDGE,
     DEFAULT_CLOSURE_TIME_S,
     _load_sumo_modules,
-    _read_summary,
-    _read_trips,
     run_closure,
 )
-from .commands import MissingSumoError, find_sumo_binary
-from .config import SimulationConfig
-
-
-def _scenario_dir(project_dir: Path, vehicles: int, seed: int) -> Path:
-    return project_dir / "outputs" / "information-sweep" / f"vehicles-{vehicles}" / f"seed-{seed}"
+from .commands import MissingSumoError
+from .config import SimulationConfig, project_result_path
+from .demand import read_trips
+from .experiments import run_tasks, scenario_dir
+from .metrics import read_summary, write_dict_rows
+from .simulation import build_sumo_command
 
 
 def _queue_edges(network: Any, edge_id: str) -> tuple[str, ...]:
@@ -50,16 +47,12 @@ def _baseline_probe(
         if not candidate.startswith(":")
         and all(candidate != queue_edge for queue_edge in queue_edge_ids)
     )
-    command = [
-        find_sumo_binary("sumo"),
-        "--net-file", str(config.network_file),
-        "--route-files", str(config.routes_file),
-        "--seed", str(config.seed),
-        "--threads", "1",
-        "--end", str(closure_time_s + 1),
-        "--no-step-log", "true",
-        "--no-warnings", "true",
-    ]
+    command = build_sumo_command(
+        config,
+        end_s=closure_time_s + 1,
+        write_metrics=False,
+        suppress_warnings=True,
+    )
     queue_samples: list[float] = []
     alternative_samples: list[float] = []
     queue_at_closure = 0.0
@@ -111,16 +104,12 @@ def _baseline_probe(
 def _run_seed(task: tuple[Path, int, int, str, float, dict[str, str]]) -> dict[str, object]:
     project_dir, vehicles, seed, edge_id, closure_time_s, outcome = task
     config = SimulationConfig(
-        project_dir=_scenario_dir(project_dir, vehicles, seed),
+        project_dir=scenario_dir(project_dir, "information-sweep", vehicles, seed),
         vehicles=vehicles,
         seed=seed,
     )
     output_prefix = f"diagnostic-global-{seed}"
-    summary_path = (
-        config.project_dir
-        / "results"
-        / f"{output_prefix.replace('-', '_')}_run_summary.csv"
-    )
+    _, summary_path = config.named_result_paths(output_prefix)
     if not summary_path.exists():
         print(f"[{seed}] Running global diagnostic...", flush=True)
         run_closure(
@@ -131,10 +120,10 @@ def _run_seed(task: tuple[Path, int, int, str, float, dict[str, str]]) -> dict[s
             output_prefix=output_prefix,
             write_comparison=False,
         )
-    diagnostic = _read_summary(summary_path)
+    diagnostic = read_summary(summary_path)
     alternative_edge_ids = tuple(diagnostic.get("alternative_edge_ids", "").split())
     baseline = _baseline_probe(config, edge_id, alternative_edge_ids, closure_time_s)
-    trips = _read_trips(config.routes_file)
+    trips = read_trips(config.routes_file)
     row: dict[str, object] = {
         "seed": seed,
         "group": "global_worse" if outcome["global_worse_by_primary_metric"] == "True" else "global_better",
@@ -166,14 +155,6 @@ def _run_seed(task: tuple[Path, int, int, str, float, dict[str, str]]) -> dict[s
     }
     row.update(baseline)
     return row
-
-
-def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
 
 
 def _group_summary(rows: list[dict[str, object]], group: str) -> dict[str, object]:
@@ -238,7 +219,7 @@ def run_condition_analysis(
     closure_time_s: float = DEFAULT_CLOSURE_TIME_S,
     parallel: int = 1,
 ) -> tuple[Path, Path]:
-    sweep_path = project_dir / "results" / "information_seed_sweep.csv"
+    sweep_path = project_result_path(project_dir, "information_seed_sweep.csv")
     if not sweep_path.exists():
         raise RuntimeError("Run shield-information-sweep before condition analysis")
     with sweep_path.open(newline="", encoding="utf-8") as handle:
@@ -249,16 +230,12 @@ def run_condition_analysis(
         (project_dir, vehicles, int(row["seed"]), edge_id, closure_time_s, row)
         for row in outcomes
     ]
-    if parallel == 1:
-        rows = [_run_seed(task) for task in tasks]
-    else:
-        with ProcessPoolExecutor(max_workers=parallel) as executor:
-            rows = list(executor.map(_run_seed, tasks))
+    rows = run_tasks(_run_seed, tasks, parallel)
     rows.sort(key=lambda row: int(row["seed"]))
-    results_path = project_dir / "results" / "information_condition_analysis.csv"
-    summary_path = project_dir / "results" / "information_condition_summary.csv"
-    _write_rows(results_path, rows)
-    _write_rows(
+    results_path = project_result_path(project_dir, "information_condition_analysis.csv")
+    summary_path = project_result_path(project_dir, "information_condition_summary.csv")
+    write_dict_rows(results_path, rows)
+    write_dict_rows(
         summary_path,
         [_group_summary(rows, "global_better"), _group_summary(rows, "global_worse")],
     )

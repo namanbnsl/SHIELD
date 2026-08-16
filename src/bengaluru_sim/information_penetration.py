@@ -5,38 +5,34 @@ import csv
 import statistics
 import subprocess
 import sys
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from .closure import (
     DEFAULT_CLOSED_EDGE,
     DEFAULT_CLOSURE_TIME_S,
     ClosureMetrics,
-    _read_summary,
-    _read_trips,
     run_closure,
 )
 from .commands import MissingSumoError
-from .config import SimulationConfig
-from .demand import generate_demand
-from .information import _teleports
-from .metrics import Summary, collect_results
+from .config import DEFAULT_SEED, SimulationConfig, project_result_path
+from .demand import generate_demand, read_trips
+from .experiments import prepare_scenario, run_tasks, scenario_dir
+from .metrics import (
+    Summary,
+    collect_results,
+    mean_or_zero,
+    median_or_zero,
+    quartile,
+    read_summary,
+    read_teleports,
+    write_dict_rows,
+)
 from .network import sha256_file
 
 
-DEFAULT_START_SEED = 42
+DEFAULT_START_SEED = DEFAULT_SEED
 DEFAULT_SEED_COUNT = 20
 DEFAULT_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
-
-
-def _scenario_dir(project_dir: Path, vehicles: int, seed: int) -> Path:
-    return (
-        project_dir
-        / "outputs"
-        / "information-penetration"
-        / f"vehicles-{vehicles}"
-        / f"seed-{seed}"
-    )
 
 
 def _fraction_label(fraction: float) -> str:
@@ -44,23 +40,16 @@ def _fraction_label(fraction: float) -> str:
 
 
 def _prepare_scenario(project_dir: Path, vehicles: int, seed: int) -> SimulationConfig:
-    scenario = _scenario_dir(project_dir, vehicles, seed)
-    scenario.mkdir(parents=True, exist_ok=True)
-    data_link = scenario / "data"
-    if not data_link.exists():
-        data_link.symlink_to(project_dir / "data", target_is_directory=True)
-
-    config = SimulationConfig(project_dir=scenario, vehicles=vehicles, seed=seed)
+    config = prepare_scenario(project_dir, "information-penetration", vehicles, seed)
     if not config.routes_file.exists():
-        source_run = (
-            project_dir
-            / "outputs"
-            / "information-sweep"
-            / f"vehicles-{vehicles}"
-            / f"seed-{seed}"
-            / "outputs"
-            / f"seed-{seed}"
+        source_config = SimulationConfig(
+            project_dir=scenario_dir(
+                project_dir, "information-sweep", vehicles, seed
+            ),
+            vehicles=vehicles,
+            seed=seed,
         )
+        source_run = source_config.run_dir
         if source_run.exists():
             config.run_dir.parent.mkdir(parents=True, exist_ok=True)
             config.run_dir.symlink_to(source_run, target_is_directory=True)
@@ -71,7 +60,7 @@ def _prepare_scenario(project_dir: Path, vehicles: int, seed: int) -> Simulation
                 raise RuntimeError(
                     f"seed {seed}: generated {len(trips)} trips, expected {vehicles}"
                 )
-    trips = _read_trips(config.routes_file)
+    trips = read_trips(config.routes_file)
     if len(trips) != vehicles:
         raise RuntimeError(
             f"seed {seed}: existing demand has {len(trips)} trips, expected {vehicles}"
@@ -93,19 +82,12 @@ def _summary_from_saved_partial(
 ) -> tuple[Summary, ClosureMetrics, int]:
     label = _fraction_label(fraction)
     output_prefix = f"information-penetration-{label}"
-    summary_path = (
-        config.project_dir
-        / "results"
-        / f"{output_prefix.replace('-', '_')}_run_summary.csv"
-    )
-    values = _read_summary(summary_path)
-    trips = _read_trips(config.routes_file)
+    _, summary_path = config.named_result_paths(output_prefix)
+    values = read_summary(summary_path)
+    trips = read_trips(config.routes_file)
     _, summary = collect_results(
         trips,
-        config.project_dir
-        / "outputs"
-        / f"seed-{config.seed}-{output_prefix}"
-        / "tripinfo.xml",
+        config.output_dir(output_prefix) / "tripinfo.xml",
         simulation_end_s=config.simulation_end_s,
     )
     extra = ClosureMetrics(
@@ -124,12 +106,7 @@ def _summary_from_saved_partial(
     return (
         summary,
         extra,
-        _teleports(
-            config.project_dir
-            / "outputs"
-            / f"seed-{config.seed}-{output_prefix}"
-            / "statistics.xml"
-        ),
+        read_teleports(config.output_dir(output_prefix) / "statistics.xml"),
     )
 
 
@@ -176,15 +153,8 @@ def _source_endpoint_row(
     closure_time_s: float,
     fraction: float,
 ) -> dict[str, object] | None:
-    source = (
-        project_dir
-        / "outputs"
-        / "information-sweep"
-        / f"vehicles-{vehicles}"
-        / f"seed-{seed}"
-        / "results"
-        / "information_comparison.csv"
-    )
+    source_project = scenario_dir(project_dir, "information-sweep", vehicles, seed)
+    source = project_result_path(source_project, "information_comparison.csv")
     if not source.exists():
         return None
     rows = _read_comparison(source)
@@ -247,17 +217,8 @@ def _run_seed_fraction(
 
     label = _fraction_label(fraction)
     output_prefix = f"information-penetration-{label}"
-    summary_path = (
-        config.project_dir
-        / "results"
-        / f"{output_prefix.replace('-', '_')}_run_summary.csv"
-    )
-    tripinfo_path = (
-        config.project_dir
-        / "outputs"
-        / f"seed-{seed}-{output_prefix}"
-        / "tripinfo.xml"
-    )
+    _, summary_path = config.named_result_paths(output_prefix)
+    tripinfo_path = config.output_dir(output_prefix) / "tripinfo.xml"
     if resume and summary_path.exists() and tripinfo_path.exists():
         summary, extra, teleports = _summary_from_saved_partial(config, fraction)
     else:
@@ -271,12 +232,7 @@ def _run_seed_fraction(
             output_prefix=output_prefix,
             write_comparison=False,
         )
-        teleports = _teleports(
-            config.project_dir
-            / "outputs"
-            / f"seed-{seed}-{output_prefix}"
-            / "statistics.xml"
-        )
+        teleports = read_teleports(config.output_dir(output_prefix) / "statistics.xml")
     return _row_from_metrics(
         config,
         edge_id,
@@ -287,30 +243,6 @@ def _run_seed_fraction(
         extra,
         teleports,
     )
-
-
-def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def _mean(values: list[float]) -> float:
-    return statistics.fmean(values) if values else 0.0
-
-
-def _median(values: list[float]) -> float:
-    return statistics.median(values) if values else 0.0
-
-
-def _quantile(values: list[float], fraction: float) -> float:
-    if len(values) == 1:
-        return values[0]
-    return statistics.quantiles(values, n=4, method="inclusive")[
-        int(fraction * 4) - 1
-    ]
 
 
 def _summary_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -339,36 +271,36 @@ def _summary_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
                 "informed_fraction": fraction,
                 "informed_percent": fraction * 100,
                 "seed_count": len(selected),
-                "total_time_loss_mean_s": _mean(delays),
-                "total_time_loss_median_s": _median(delays),
+                "total_time_loss_mean_s": mean_or_zero(delays),
+                "total_time_loss_median_s": median_or_zero(delays),
                 "total_time_loss_stddev_s": statistics.pstdev(delays),
-                "total_time_loss_p25_s": _quantile(delays, 0.25),
-                "total_time_loss_p75_s": _quantile(delays, 0.75),
+                "total_time_loss_p25_s": quartile(delays, 0.25),
+                "total_time_loss_p75_s": quartile(delays, 0.75),
                 "total_time_loss_min_s": min(delays),
                 "total_time_loss_max_s": max(delays),
-                "mean_time_loss_per_vehicle_s": _mean(
+                "mean_time_loss_per_vehicle_s": mean_or_zero(
                     [float(row["mean_time_loss_s"]) for row in selected]
                 ),
-                "mean_completed_trips": _mean(
+                "mean_completed_trips": mean_or_zero(
                     [float(row["completed_trips"]) for row in selected]
                 ),
-                "mean_teleports": _mean(
+                "mean_teleports": mean_or_zero(
                     [float(row["teleports"]) for row in selected]
                 ),
-                "mean_rerouted_vehicles": _mean(
+                "mean_rerouted_vehicles": mean_or_zero(
                     [float(row["rerouted_vehicles"]) for row in selected]
                 ),
-                "mean_max_alternative_congestion": _mean(
+                "mean_max_alternative_congestion": mean_or_zero(
                     [
                         float(row["maximum_congestion_on_alternative_routes"])
                         for row in selected
                     ]
                 ),
                 "difference_from_zero_mean_s": (
-                    _mean(paired_differences) if paired_differences else ""
+                    mean_or_zero(paired_differences) if paired_differences else ""
                 ),
                 "difference_from_zero_median_s": (
-                    _median(paired_differences) if paired_differences else ""
+                    median_or_zero(paired_differences) if paired_differences else ""
                 ),
                 "better_than_zero_seed_count": (
                     sum(difference < 0 for difference in paired_differences)
@@ -410,29 +342,22 @@ def run_information_penetration(
     fractions = tuple(sorted(set(fractions)))
 
     demand_tasks = [(project_dir, vehicles, seed) for seed in seeds]
-    if parallel == 1:
-        for project, count, seed in demand_tasks:
-            _prepare_scenario(project, count, seed)
-    else:
-        with ProcessPoolExecutor(max_workers=parallel) as executor:
-            list(executor.map(_prepare_task, demand_tasks))
+    run_tasks(_prepare_task, demand_tasks, parallel)
 
     tasks = [
         (project_dir, vehicles, seed, fraction, edge_id, closure_time_s, resume)
         for fraction in fractions
         for seed in seeds
     ]
-    if parallel == 1:
-        rows = [_run_seed_fraction(task) for task in tasks]
-    else:
-        with ProcessPoolExecutor(max_workers=parallel) as executor:
-            rows = list(executor.map(_run_seed_fraction, tasks))
+    rows = run_tasks(_run_seed_fraction, tasks, parallel)
     rows.sort(key=lambda row: (float(row["informed_fraction"]), int(row["seed"])))
 
-    results_path = project_dir / "results" / "information_penetration.csv"
-    summary_path = project_dir / "results" / "information_penetration_summary.csv"
-    _write_rows(results_path, rows)
-    _write_rows(summary_path, _summary_rows(rows))
+    results_path = project_result_path(project_dir, "information_penetration.csv")
+    summary_path = project_result_path(
+        project_dir, "information_penetration_summary.csv"
+    )
+    write_dict_rows(results_path, rows)
+    write_dict_rows(summary_path, _summary_rows(rows))
     return results_path, summary_path
 
 

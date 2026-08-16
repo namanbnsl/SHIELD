@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .commands import MissingSumoError, find_sumo_binary
-from .config import DEFAULT_BBOX, SimulationConfig
+from .config import DEFAULT_BBOX, DEFAULT_SEED, SimulationConfig
 from .demand import generate_demand
 from .metrics import collect_results, write_results, write_summary
 from .network import build_network, sha256_file
@@ -18,7 +18,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Run the minimal Bengaluru SUMO traffic simulation."
     )
     parser.add_argument("--vehicles", type=int, default=1_000)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--demand-duration", type=float, default=3_600.0, metavar="SECONDS")
     parser.add_argument("--simulation-end", type=float, default=7_200.0, metavar="SECONDS")
     parser.add_argument("--min-trip-distance", type=float, default=800.0, metavar="METERS")

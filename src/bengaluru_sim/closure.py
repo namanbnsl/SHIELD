@@ -1,22 +1,29 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import random
 import subprocess
 import sys
-import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass
 from importlib.metadata import distribution
 from pathlib import Path
 from typing import Any, Literal
 
-from .commands import MissingSumoError, find_sumo_binary
-from .config import SimulationConfig
-from .demand import Trip
-from .metrics import Summary, collect_results, write_results, write_summary
+from .commands import MissingSumoError
+from .config import SimulationConfig, project_result_path
+from .demand import read_trips
+from .metrics import (
+    Summary,
+    collect_results,
+    read_summary as _read_summary,
+    read_teleports,
+    write_csv_rows,
+    write_results,
+    write_summary,
+)
 from .network import sha256_file
+from .simulation import build_sumo_command
 
 
 DEFAULT_CLOSED_EDGE = "377105483#0"
@@ -63,27 +70,11 @@ def _load_sumo_modules() -> tuple[Any, Any]:
     return traci, sumolib
 
 
-def _read_trips(path: Path) -> list[Trip]:
-    trips: list[Trip] = []
-    for vehicle in ET.parse(path).getroot().findall("vehicle"):
-        route = vehicle.find("route")
-        edges = tuple(route.get("edges", "").split()) if route is not None else ()
-        if not edges:
-            continue
-        trips.append(
-            Trip(
-                vehicle_id=vehicle.get("id", ""),
-                scheduled_departure_s=float(vehicle.get("depart", "0")),
-                origin_edge=edges[0],
-                destination_edge=edges[-1],
-                route_edges=edges,
-            )
-        )
-    return trips
+_read_trips = read_trips
 
 
 def _comparison_file(project_dir: Path) -> Path:
-    return project_dir / "results" / "closure_comparison.csv"
+    return project_result_path(project_dir, "closure_comparison.csv")
 
 
 def _write_comparison(
@@ -130,16 +121,11 @@ def _write_comparison(
             "vehicles",
         ),
     ]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["metric", "baseline", "road_closure", "unit"])
-        writer.writerows(rows)
-
-
-def _read_summary(path: Path) -> dict[str, str]:
-    with path.open(newline="", encoding="utf-8") as handle:
-        return {row["metric"]: row["value"] for row in csv.DictReader(handle)}
+    write_csv_rows(
+        path,
+        ["metric", "baseline", "road_closure", "unit"],
+        rows,
+    )
 
 
 def run_closure(
@@ -167,7 +153,7 @@ def run_closure(
     if not 0 < closure_time_s < config.simulation_end_s:
         raise ValueError("closure time must fall within the simulation")
 
-    trips = _read_trips(config.routes_file)
+    trips = read_trips(config.routes_file)
     original_routes = {trip.vehicle_id: trip.route_edges for trip in trips}
     informed_vehicle_ids = (
         _select_informed_vehicle_ids(
@@ -187,26 +173,14 @@ def run_closure(
     )
 
     run_name = "closure" if output_prefix is None else output_prefix
-    closure_dir = config.project_dir / "outputs" / f"seed-{config.seed}-{run_name}"
+    closure_dir = config.output_dir(run_name)
     closure_dir.mkdir(parents=True, exist_ok=True)
     tripinfo_file = closure_dir / "tripinfo.xml"
     statistics_file = closure_dir / "statistics.xml"
     log_file = closure_dir / "sumo.log"
-    command = [
-        find_sumo_binary("sumo"),
-        "--net-file", str(config.network_file),
-        "--route-files", str(config.routes_file),
-        "--seed", str(config.seed),
-        "--threads", "1",
-        "--end", str(config.simulation_end_s),
-        "--tripinfo-output", str(tripinfo_file),
-        "--tripinfo-output.write-unfinished", "true",
-        "--tripinfo-output.write-undeparted", "true",
-        "--statistic-output", str(statistics_file),
-        "--no-step-log", "true",
-        "--duration-log.statistics", "true",
-        "--no-warnings", "true",
-    ]
+    command = build_sumo_command(
+        config, output_dir=closure_dir, suppress_warnings=True
+    )
 
     directly_affected: set[str] = set()
     rerouted: set[str] = set()
@@ -311,14 +285,9 @@ def run_closure(
     results, summary = collect_results(
         trips, tripinfo_file, simulation_end_s=config.simulation_end_s
     )
-    statistics_root = ET.parse(statistics_file).getroot()
-    teleports_node = statistics_root.find("teleports")
-    closure_teleports = (
-        0 if teleports_node is None else int(teleports_node.get("total", "0"))
-    )
+    closure_teleports = read_teleports(statistics_file)
     result_stem = "closure" if output_prefix is None else output_prefix.replace("-", "_")
-    result_file = config.project_dir / "results" / f"{result_stem}_run.csv"
-    summary_file = config.project_dir / "results" / f"{result_stem}_run_summary.csv"
+    result_file, summary_file = config.named_result_paths(result_stem)
     write_results(result_file, results)
     extra = ClosureMetrics(
         len(directly_affected),

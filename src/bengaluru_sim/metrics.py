@@ -33,6 +33,50 @@ class Summary:
     mean_time_loss_s: float = 0.0
 
 
+def write_csv_rows(path: Path, header: list[str], rows: list[tuple[object, ...]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def write_dict_rows(path: Path, rows: list[dict[str, object]]) -> None:
+    if not rows:
+        raise ValueError("cannot write a result table without rows")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def read_summary(path: Path) -> dict[str, str]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        return {row["metric"]: row["value"] for row in csv.DictReader(handle)}
+
+
+def read_teleports(path: Path) -> int:
+    element = ET.parse(path).getroot().find("teleports")
+    return 0 if element is None else int(element.get("total", "0"))
+
+
+def mean_or_zero(values: list[float]) -> float:
+    return statistics.fmean(values) if values else 0.0
+
+
+def median_or_zero(values: list[float]) -> float:
+    return statistics.median(values) if values else 0.0
+
+
+def quartile(values: list[float], fraction: float) -> float:
+    if len(values) == 1:
+        return values[0]
+    return statistics.quantiles(values, n=4, method="inclusive")[
+        int(fraction * 4) - 1
+    ]
+
+
 def _optional_nonnegative(value: str | None) -> float | None:
     if value is None:
         return None
@@ -104,40 +148,53 @@ def collect_results(
 
 
 def write_results(path: Path, results: list[VehicleResult]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(
-            [
-                "vehicle_id",
-                "scheduled_departure_time_s",
-                "departure_time_s",
-                "arrival_time_s",
-                "travel_time_s",
-                "status",
-                "origin_edge",
-                "destination_edge",
-                "time_loss_s",
-            ]
-        )
-        for result in results:
-            writer.writerow(
-                [
-                    result.vehicle_id,
-                    f"{result.scheduled_departure_time_s:.2f}",
-                    "" if result.departure_time_s is None else f"{result.departure_time_s:.2f}",
-                    "" if result.arrival_time_s is None else f"{result.arrival_time_s:.2f}",
-                    "" if result.travel_time_s is None else f"{result.travel_time_s:.2f}",
-                    result.status,
-                    result.origin_edge,
-                    result.destination_edge,
-                    "" if result.time_loss_s is None else f"{result.time_loss_s:.2f}",
-                ]
+    write_csv_rows(
+        path,
+        [
+            "vehicle_id",
+            "scheduled_departure_time_s",
+            "departure_time_s",
+            "arrival_time_s",
+            "travel_time_s",
+            "status",
+            "origin_edge",
+            "destination_edge",
+            "time_loss_s",
+        ],
+        [
+            (
+                result.vehicle_id,
+                f"{result.scheduled_departure_time_s:.2f}",
+                (
+                    ""
+                    if result.departure_time_s is None
+                    else f"{result.departure_time_s:.2f}"
+                ),
+                (
+                    ""
+                    if result.arrival_time_s is None
+                    else f"{result.arrival_time_s:.2f}"
+                ),
+                (
+                    ""
+                    if result.travel_time_s is None
+                    else f"{result.travel_time_s:.2f}"
+                ),
+                result.status,
+                result.origin_edge,
+                result.destination_edge,
+                (
+                    ""
+                    if result.time_loss_s is None
+                    else f"{result.time_loss_s:.2f}"
+                ),
             )
+            for result in results
+        ],
+    )
 
 
 def write_summary(path: Path, summary: Summary, metadata: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     rows: list[tuple[str, object, str]] = [
         ("vehicles", summary.vehicles, "count"),
         ("completed_trips", summary.completed, "count"),
@@ -156,7 +213,4 @@ def write_summary(path: Path, summary: Summary, metadata: dict[str, object]) -> 
         ("mean_time_loss", f"{summary.mean_time_loss_s:.2f}", "seconds/vehicle"),
     ]
     rows.extend((key, value, "") for key, value in metadata.items())
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["metric", "value", "unit"])
-        writer.writerows(rows)
+    write_csv_rows(path, ["metric", "value", "unit"], rows)

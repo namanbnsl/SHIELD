@@ -5,31 +5,23 @@ import csv
 import statistics
 import subprocess
 import sys
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from .closure import DEFAULT_CLOSED_EDGE, DEFAULT_CLOSURE_TIME_S, _read_trips
+from .closure import DEFAULT_CLOSED_EDGE, DEFAULT_CLOSURE_TIME_S
 from .commands import MissingSumoError
-from .config import SimulationConfig
-from .demand import generate_demand
+from .config import DEFAULT_SEED, SimulationConfig, project_result_path
+from .demand import generate_demand, read_trips
+from .experiments import prepare_scenario, run_tasks
 from .information import refresh_information_comparison, run_information_comparison
+from .metrics import mean_or_zero, median_or_zero, quartile, write_dict_rows
 
 
-DEFAULT_START_SEED = 42
+DEFAULT_START_SEED = DEFAULT_SEED
 DEFAULT_SEED_COUNT = 50
 
 
-def _scenario_dir(project_dir: Path, vehicles: int, seed: int) -> Path:
-    return project_dir / "outputs" / "information-sweep" / f"vehicles-{vehicles}" / f"seed-{seed}"
-
-
 def _prepare_scenario(project_dir: Path, vehicles: int, seed: int) -> SimulationConfig:
-    scenario = _scenario_dir(project_dir, vehicles, seed)
-    scenario.mkdir(parents=True, exist_ok=True)
-    data_link = scenario / "data"
-    if not data_link.exists():
-        data_link.symlink_to(project_dir / "data", target_is_directory=True)
-    return SimulationConfig(project_dir=scenario, vehicles=vehicles, seed=seed)
+    return prepare_scenario(project_dir, "information-sweep", vehicles, seed)
 
 
 def _read_comparison(path: Path) -> list[dict[str, str]]:
@@ -97,7 +89,7 @@ def _prepare_demand(task: tuple[Path, int, int, bool]) -> None:
     project_dir, vehicles, seed, resume = task
     config = _prepare_scenario(project_dir, vehicles, seed)
     if resume and config.routes_file.exists():
-        trips = _read_trips(config.routes_file)
+        trips = read_trips(config.routes_file)
         if len(trips) != vehicles:
             raise RuntimeError(
                 f"seed {seed}: existing demand has {len(trips)} trips, expected {vehicles}"
@@ -112,7 +104,7 @@ def _prepare_demand(task: tuple[Path, int, int, bool]) -> None:
 def _run_seed(task: tuple[Path, int, int, str, float, bool]) -> dict[str, object]:
     project_dir, vehicles, seed, edge_id, closure_time_s, resume = task
     config = _prepare_scenario(project_dir, vehicles, seed)
-    comparison_path = config.project_dir / "results" / "information_comparison.csv"
+    comparison_path = config.result_path("information_comparison.csv")
     if resume and comparison_path.exists():
         existing_rows = _read_comparison(comparison_path)
         if "total_time_loss_s" in existing_rows[0]:
@@ -124,28 +116,6 @@ def _run_seed(task: tuple[Path, int, int, str, float, bool]) -> dict[str, object
         print(f"[{seed}] Running both information strategies...", flush=True)
         run_information_comparison(config, edge_id, closure_time_s)
     return _difference_row(_read_comparison(comparison_path))
-
-
-def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def _mean(values: list[float]) -> float:
-    return statistics.fmean(values) if values else 0.0
-
-
-def _median(values: list[float]) -> float:
-    return statistics.median(values) if values else 0.0
-
-
-def _quantile(values: list[float], fraction: float) -> float:
-    if len(values) == 1:
-        return values[0]
-    return statistics.quantiles(values, n=4, method="inclusive")[int(fraction * 4) - 1]
 
 
 def _summary_row(
@@ -194,48 +164,60 @@ def _summary_row(
         "closure_time_s": closure_time_s,
         "closed_edge_id": edge_id,
         "network_sha256": rows[0]["network_sha256"],
-        "mean_travel_time_difference_mean_s": _mean(mean_differences),
-        "mean_travel_time_difference_median_s": _median(mean_differences),
+        "mean_travel_time_difference_mean_s": mean_or_zero(mean_differences),
+        "mean_travel_time_difference_median_s": median_or_zero(mean_differences),
         "mean_travel_time_difference_stddev_s": statistics.pstdev(mean_differences),
-        "mean_travel_time_difference_p25_s": _quantile(mean_differences, 0.25),
-        "mean_travel_time_difference_p75_s": _quantile(mean_differences, 0.75),
+        "mean_travel_time_difference_p25_s": quartile(mean_differences, 0.25),
+        "mean_travel_time_difference_p75_s": quartile(mean_differences, 0.75),
         "mean_travel_time_difference_min_s": min(mean_differences),
         "mean_travel_time_difference_max_s": max(mean_differences),
-        "total_time_loss_difference_mean_s": _mean(total_time_loss_differences),
-        "total_time_loss_difference_median_s": _median(total_time_loss_differences),
+        "total_time_loss_difference_mean_s": mean_or_zero(
+            total_time_loss_differences
+        ),
+        "total_time_loss_difference_median_s": median_or_zero(
+            total_time_loss_differences
+        ),
         "total_time_loss_difference_stddev_s": statistics.pstdev(
             total_time_loss_differences
         ),
-        "total_time_loss_difference_p25_s": _quantile(
+        "total_time_loss_difference_p25_s": quartile(
             total_time_loss_differences, 0.25
         ),
-        "total_time_loss_difference_p75_s": _quantile(
+        "total_time_loss_difference_p75_s": quartile(
             total_time_loss_differences, 0.75
         ),
         "total_time_loss_difference_min_s": min(total_time_loss_differences),
         "total_time_loss_difference_max_s": max(total_time_loss_differences),
-        "minimal_mean_travel_time_across_seeds_s": _mean(minimal_means),
-        "global_mean_travel_time_across_seeds_s": _mean(global_means),
-        "minimal_total_time_loss_across_seeds_s": _mean(minimal_total_time_loss),
-        "global_total_time_loss_across_seeds_s": _mean(global_total_time_loss),
-        "minimal_teleports_mean": _mean(minimal_teleports),
-        "global_teleports_mean": _mean(global_teleports),
-        "teleports_difference_mean": _mean(teleports_differences),
-        "teleports_difference_median": _median(teleports_differences),
+        "minimal_mean_travel_time_across_seeds_s": mean_or_zero(minimal_means),
+        "global_mean_travel_time_across_seeds_s": mean_or_zero(global_means),
+        "minimal_total_time_loss_across_seeds_s": mean_or_zero(
+            minimal_total_time_loss
+        ),
+        "global_total_time_loss_across_seeds_s": mean_or_zero(
+            global_total_time_loss
+        ),
+        "minimal_teleports_mean": mean_or_zero(minimal_teleports),
+        "global_teleports_mean": mean_or_zero(global_teleports),
+        "teleports_difference_mean": mean_or_zero(teleports_differences),
+        "teleports_difference_median": median_or_zero(teleports_differences),
         "global_more_teleports_seed_count": global_more_teleports,
         "global_more_teleports_percentage": 100 * global_more_teleports / len(rows),
-        "minimal_max_alternative_congestion_mean": _mean(minimal_congestion),
-        "global_max_alternative_congestion_mean": _mean(global_congestion),
-        "max_alternative_congestion_difference_mean": _mean(congestion_differences),
-        "max_alternative_congestion_difference_median": _median(congestion_differences),
+        "minimal_max_alternative_congestion_mean": mean_or_zero(minimal_congestion),
+        "global_max_alternative_congestion_mean": mean_or_zero(global_congestion),
+        "max_alternative_congestion_difference_mean": mean_or_zero(
+            congestion_differences
+        ),
+        "max_alternative_congestion_difference_median": median_or_zero(
+            congestion_differences
+        ),
         "global_higher_congestion_seed_count": global_higher_congestion,
         "global_higher_congestion_percentage": 100
         * global_higher_congestion
         / len(rows),
-        "completed_trips_difference_mean": _mean(
+        "completed_trips_difference_mean": mean_or_zero(
             [float(value) for value in completion_differences]
         ),
-        "completed_trips_difference_median": _median(
+        "completed_trips_difference_median": median_or_zero(
             [float(value) for value in completion_differences]
         ),
         "global_worse_seed_count": global_worse,
@@ -247,7 +229,7 @@ def _summary_row(
         * sum(bool(row["global_worse_by_mean_travel_time"]) for row in rows)
         / len(rows),
         "per_seed_results": str(
-            project_dir / "results" / "information_seed_sweep.csv"
+            project_result_path(project_dir, "information_seed_sweep.csv")
         ),
     }
 
@@ -255,7 +237,9 @@ def _summary_row(
 def run_information_sweep(
     project_dir: Path,
     vehicles: int = 2_500,
-    seeds: tuple[int, ...] = tuple(range(DEFAULT_START_SEED, DEFAULT_START_SEED + DEFAULT_SEED_COUNT)),
+    seeds: tuple[int, ...] = tuple(
+        range(DEFAULT_START_SEED, DEFAULT_START_SEED + DEFAULT_SEED_COUNT)
+    ),
     edge_id: str = DEFAULT_CLOSED_EDGE,
     closure_time_s: float = DEFAULT_CLOSURE_TIME_S,
     parallel: int = 1,
@@ -265,30 +249,22 @@ def run_information_sweep(
         raise ValueError("at least one seed is required")
     if parallel <= 0:
         raise ValueError("parallel must be positive")
-
     demand_tasks = [(project_dir, vehicles, seed, resume) for seed in seeds]
-    if parallel == 1:
-        for task in demand_tasks:
-            _prepare_demand(task)
-    else:
-        with ProcessPoolExecutor(max_workers=parallel) as executor:
-            list(executor.map(_prepare_demand, demand_tasks))
+    run_tasks(_prepare_demand, demand_tasks, parallel)
 
     tasks = [
         (project_dir, vehicles, seed, edge_id, closure_time_s, resume)
         for seed in seeds
     ]
-    if parallel == 1:
-        rows = [_run_seed(task) for task in tasks]
-    else:
-        with ProcessPoolExecutor(max_workers=parallel) as executor:
-            rows = list(executor.map(_run_seed, tasks))
+    rows = run_tasks(_run_seed, tasks, parallel)
     rows.sort(key=lambda row: int(row["seed"]))
 
-    results_path = project_dir / "results" / "information_seed_sweep.csv"
-    summary_path = project_dir / "results" / "information_seed_sweep_summary.csv"
-    _write_rows(results_path, rows)
-    _write_rows(
+    results_path = project_result_path(project_dir, "information_seed_sweep.csv")
+    summary_path = project_result_path(
+        project_dir, "information_seed_sweep_summary.csv"
+    )
+    write_dict_rows(results_path, rows)
+    write_dict_rows(
         summary_path,
         [_summary_row(rows, project_dir, vehicles, seeds, edge_id, closure_time_s)],
     )

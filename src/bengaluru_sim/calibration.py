@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import subprocess
 import sys
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,15 +11,23 @@ from .closure import (
     DEFAULT_CLOSURE_TIME_S,
     ClosureMetrics,
     _load_sumo_modules,
-    _read_summary,
-    _read_trips,
     run_closure,
 )
-from .commands import MissingSumoError, find_sumo_binary
-from .config import SimulationConfig
-from .demand import generate_demand
-from .metrics import Summary, collect_results, write_results, write_summary
+from .commands import MissingSumoError
+from .config import DEFAULT_SEED, SimulationConfig, project_result_path
+from .demand import generate_demand, read_trips
+from .experiments import prepare_scenario
+from .metrics import (
+    Summary,
+    collect_results,
+    read_summary,
+    read_teleports,
+    write_dict_rows,
+    write_results,
+    write_summary,
+)
 from .network import sha256_file
+from .simulation import build_sumo_command
 
 
 VEHICLE_COUNTS = (1_000, 2_000, 4_000, 6_000)
@@ -35,10 +41,7 @@ class BaselineMetrics:
     teleports: int
 
 
-def _teleports(path: Path) -> int:
-    root = ET.parse(path).getroot()
-    element = root.find("teleports")
-    return 0 if element is None else int(element.get("total", "0"))
+_teleports = read_teleports
 
 
 def _queue_edges(network: object, edge_id: str) -> tuple[str, ...]:
@@ -51,21 +54,7 @@ def _run_observed_baseline(config: SimulationConfig) -> BaselineMetrics:
     network = sumolib.net.readNet(str(config.network_file))
     observed_edges = _queue_edges(network, DEFAULT_CLOSED_EDGE)
     config.run_dir.mkdir(parents=True, exist_ok=True)
-    command = [
-        find_sumo_binary("sumo"),
-        "--net-file", str(config.network_file),
-        "--route-files", str(config.routes_file),
-        "--seed", str(config.seed),
-        "--threads", "1",
-        "--end", str(config.simulation_end_s),
-        "--tripinfo-output", str(config.tripinfo_file),
-        "--tripinfo-output.write-unfinished", "true",
-        "--tripinfo-output.write-undeparted", "true",
-        "--statistic-output", str(config.statistics_file),
-        "--no-step-log", "true",
-        "--duration-log.statistics", "true",
-        "--no-warnings", "true",
-    ]
+    command = build_sumo_command(config, suppress_warnings=True)
     max_congestion = 0
     connection = None
     try:
@@ -84,7 +73,7 @@ def _run_observed_baseline(config: SimulationConfig) -> BaselineMetrics:
         if connection is not None:
             connection.close()
 
-    trips = _read_trips(config.routes_file)
+    trips = read_trips(config.routes_file)
     results, summary = collect_results(
         trips, config.tripinfo_file, simulation_end_s=config.simulation_end_s
     )
@@ -106,16 +95,17 @@ def _run_observed_baseline(config: SimulationConfig) -> BaselineMetrics:
 
 
 def _prepare_scenario(root: Path, vehicles: int) -> SimulationConfig:
-    scenario = root / "outputs" / "calibration" / f"vehicles-{vehicles}"
-    data_link = scenario / "data"
-    scenario.mkdir(parents=True, exist_ok=True)
-    if not data_link.exists():
-        data_link.symlink_to(root / "data", target_is_directory=True)
-    return SimulationConfig(project_dir=scenario, vehicles=vehicles, seed=42)
+    return prepare_scenario(
+        root,
+        "calibration",
+        vehicles,
+        DEFAULT_SEED,
+        group_by_seed=False,
+    )
 
 
 def _summary_from_csv(path: Path) -> tuple[Summary, dict[str, str]]:
-    values = _read_summary(path)
+    values = read_summary(path)
     return (
         Summary(
             vehicles=int(values["vehicles"]),
@@ -180,7 +170,7 @@ def run_calibration(
             )
             continue
 
-        closure_summary_file = config.project_dir / "results" / "closure_run_summary.csv"
+        closure_summary_file = config.result_path("closure_run_summary.csv")
         if resume and closure_summary_file.exists():
             closure, closure_values = _summary_from_csv(closure_summary_file)
             extra = ClosureMetrics(
@@ -196,7 +186,7 @@ def run_calibration(
             print(f"[{vehicles:,} vehicles] Running t=900s closure...", flush=True)
             closure, extra = run_closure(config)
         closure_statistics = (
-            config.project_dir / "outputs" / "seed-42-closure" / "statistics.xml"
+            config.output_dir("closure") / "statistics.xml"
         )
         closure_teleports = _teleports(closure_statistics)
         impact = (
@@ -232,12 +222,8 @@ def run_calibration(
             flush=True,
         )
 
-    output = root / "results" / output_name
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
+    output = project_result_path(root, output_name)
+    write_dict_rows(output, rows)
     return output
 
 

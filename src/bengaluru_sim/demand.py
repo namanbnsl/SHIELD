@@ -30,6 +30,26 @@ class Trip:
     route_edges: tuple[str, ...]
 
 
+def read_trips(path: Path) -> list[Trip]:
+    """Read routed vehicles back into the demand representation."""
+    trips: list[Trip] = []
+    for vehicle in ET.parse(path).getroot().findall("vehicle"):
+        route = vehicle.find("route")
+        edges = tuple(route.get("edges", "").split()) if route is not None else ()
+        if not edges:
+            continue
+        trips.append(
+            Trip(
+                vehicle_id=vehicle.get("id", ""),
+                scheduled_departure_s=float(vehicle.get("depart", "0")),
+                origin_edge=edges[0],
+                destination_edge=edges[-1],
+                route_edges=edges,
+            )
+        )
+    return trips
+
+
 def _passenger_lane(lane: ET.Element) -> bool:
     allow = set(lane.get("allow", "").split())
     disallow = set(lane.get("disallow", "").split())

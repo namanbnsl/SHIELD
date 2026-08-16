@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .commands import MissingSumoError, find_sumo_binary
-from .config import SimulationConfig
+from .config import DEFAULT_SEED, SimulationConfig
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -16,7 +16,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=DEFAULT_SEED,
         help="generated demand seed to open (default: %(default)s)",
     )
     parser.add_argument(
