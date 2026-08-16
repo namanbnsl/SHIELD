@@ -11,6 +11,8 @@ dependencies = [
 [project.scripts]
 shield-sim = "bengaluru_sim.cli:main"
 shield-gui = "bengaluru_sim.gui:main"
+shield-closure = "bengaluru_sim.closure:main"
+shield-calibrate = "bengaluru_sim.calibration:main"
 
 [dependency-groups]
 dev = [

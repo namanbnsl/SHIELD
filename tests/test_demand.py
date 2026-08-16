@@ -44,6 +44,15 @@ def test_pair_sampling_is_repeatable_and_respects_distance() -> None:
     assert all(origin.edge_id != destination.edge_id for origin, destination in first)
 
 
+def test_weighted_roles_prefer_local_origins_and_major_destinations() -> None:
+    local = Edge("local", 0, 0, 1, "highway.residential")
+    major = Edge("major", 2_000, 0, 1, "highway.primary")
+    pairs = _sample_pairs([local, major], 200, seed=42, min_distance_m=800)
+
+    assert sum(origin.edge_id == "local" for origin, _ in pairs) > 150
+    assert sum(destination.edge_id == "major" for _, destination in pairs) > 150
+
+
 def test_candidate_departures_are_spread_and_deterministic(tmp_path: Path) -> None:
     pairs = [
         (Edge("a", 0, 0, 1), Edge("b", 1_000, 0, 1)) for _ in range(20)
@@ -60,4 +69,3 @@ def test_candidate_departures_are_spread_and_deterministic(tmp_path: Path) -> No
     ]
     assert departures == sorted(departures)
     assert departures[-1] - departures[0] > 300
-

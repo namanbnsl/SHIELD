@@ -17,6 +17,8 @@ class Edge:
     x: float
     y: float
     weight: float
+    road_type: str = ""
+    road_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -56,25 +58,82 @@ def load_edges(network_file: Path) -> list[Edge]:
         x = sum(point[0] for point in coordinates) / len(coordinates)
         y = sum(point[1] for point in coordinates) / len(coordinates)
         length = max(float(lane.get("length", "1")), 1.0)
-        edges.append(Edge(edge_id, x, y, length))
+        edges.append(
+            Edge(
+                edge_id,
+                x,
+                y,
+                length,
+                element.get("type", ""),
+                element.get("name", ""),
+            )
+        )
         element.clear()
     if len(edges) < 2:
         raise RuntimeError("SUMO network contains fewer than two passenger edges")
     return edges
 
 
+def _road_class(edge: Edge) -> str:
+    return edge.road_type.removeprefix("highway.")
+
+
+def _origin_weight(edge: Edge) -> float:
+    """Weight likely residential/local-road edges as trip origins."""
+    return {
+        "residential": 10.0,
+        "living_street": 9.0,
+        "unclassified": 4.0,
+        "tertiary": 1.5,
+        "secondary": 0.6,
+        "primary": 0.25,
+        "trunk": 0.1,
+        "trunk_link": 0.15,
+        "primary_link": 0.2,
+        "secondary_link": 0.3,
+        "tertiary_link": 0.5,
+        "service": 2.0,
+    }.get(_road_class(edge), 1.0)
+
+
+def _destination_weight(edge: Edge) -> float:
+    """Weight major corridors likely to carry employment/commercial trips."""
+    return {
+        "trunk": 12.0,
+        "primary": 10.0,
+        "secondary": 8.0,
+        "tertiary": 0.6,
+        "trunk_link": 4.0,
+        "primary_link": 4.0,
+        "secondary_link": 3.0,
+        "tertiary_link": 0.8,
+        "service": 0.8,
+        "residential": 0.03,
+        "living_street": 0.02,
+        "unclassified": 0.1,
+    }.get(_road_class(edge), 1.0)
+
+
 def _sample_pairs(
     edges: list[Edge], count: int, seed: int, min_distance_m: float
 ) -> list[tuple[Edge, Edge]]:
     rng = random.Random(seed)
-    weights = [edge.weight for edge in edges]
+    origin_weights = [_origin_weight(edge) for edge in edges]
+    destination_weights = [_destination_weight(edge) for edge in edges]
+    # Keep the existing CLI minimum as a floor, but reject very short trips in
+    # the weighted model so local-to-local artifacts do not dominate demand.
+    minimum_distance = max(min_distance_m, 1_200.0)
     pairs: list[tuple[Edge, Edge]] = []
     max_attempts = count * 100
     for _ in range(max_attempts):
-        origin, destination = rng.choices(edges, weights=weights, k=2)
+        origin = rng.choices(edges, weights=origin_weights, k=1)[0]
+        destination = rng.choices(edges, weights=destination_weights, k=1)[0]
         if origin.edge_id == destination.edge_id:
             continue
-        if math.hypot(origin.x - destination.x, origin.y - destination.y) < min_distance_m:
+        if (
+            math.hypot(origin.x - destination.x, origin.y - destination.y)
+            < minimum_distance
+        ):
             continue
         pairs.append((origin, destination))
         if len(pairs) == count:
